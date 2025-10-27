@@ -1,0 +1,251 @@
+// =========================================================
+// CHIRPS Rainfall Analysis
+// Kecamatan Babakan Madang, Juli–November 2022
+// =========================================================
+
+// ---------- [1] PARAMETER ----------
+var PARAMS = {
+  aoiAsset: 'projects/soon-463612/assets/babakan', // GANTI sesuai asset AOI kamu
+  start: '2022-07-01',
+  end:   '2022-11-30',
+  scale: 5000
+};
+
+// ---------- [2] AMBIL AOI ----------
+var aoi = ee.FeatureCollection(PARAMS.aoiAsset).geometry();
+Map.centerObject(aoi, 12);
+Map.addLayer(aoi, {color:'red'}, 'AOI Babakan Madang');
+
+// ---------- [3] AMBIL DATA CHIRPS ----------
+var chirps = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+  .filterDate(PARAMS.start, PARAMS.end)
+  .filterBounds(aoi)
+  .map(function(img){
+    var p = img.select('precipitation').updateMask(img.select('precipitation').gte(0));
+    return p.rename('P').copyProperties(img, ['system:time_start']);
+  });
+
+print('Jumlah citra CHIRPS:', chirps.size());
+
+// ---------- [4] DATA BULANAN (total mm/bulan) ----------
+function monthlySum(ic) {
+  var months = ee.List.sequence(7, 11); // Juli–November
+  var year = 2022;
+  var byMonth = months.map(function(m) {
+    var start = ee.Date.fromYMD(year, m, 1);
+    var end = start.advance(1, 'month');
+    var sum = ic.filterDate(start, end).sum().rename('P_month');
+    return sum.set('system:time_start', start.millis())
+              .set('month', ee.Date(start).format('YYYY-MM'))
+              .set('monthNum', m);
+  });
+  return ee.ImageCollection.fromImages(byMonth);
+}
+
+var chirpsMonthly = monthlySum(chirps);
+print('Koleksi bulanan:', chirpsMonthly);
+
+// ---------- [5] TOTAL PERIODE JUL–NOV ----------
+var totalPeriod = chirps.sum().rename('P_total');
+Map.addLayer(totalPeriod.clip(aoi),
+  {min:0, max:3000, palette:['ffffcc','a1dab4','41b6c4','2c7fb8','253494']},
+  'Total Rainfall Jul–Nov 2022');
+
+// ---------- [6] VISUALISASI SETIAP BULAN (fix tanpa evaluate) ----------
+var palette = ['fff7ec','fee8c8','fdbb84','e34a33','b30000'];
+var listMonthly = chirpsMonthly.toList(chirpsMonthly.size());
+
+for (var i = 0; i < listMonthly.size().getInfo(); i++) {
+  var img = ee.Image(listMonthly.get(i));
+  var monthName = img.get('month').getInfo();
+  Map.addLayer(
+    img.clip(aoi),
+    {min: 0, max: 600, palette: palette},
+    'Rainfall ' + monthName
+  );
+}
+
+
+// ---------- [7] CHART BULANAN ----------
+var chartMonthly = ui.Chart.image.series({
+  imageCollection: chirpsMonthly,
+  region: aoi,
+  reducer: ee.Reducer.mean(),
+  scale: PARAMS.scale
+})
+.setOptions({
+  title: 'CHIRPS Monthly Total (Babakan Madang, Jul–Nov 2022)',
+  hAxis: {title: 'Month'},
+  vAxis: {title: 'Rainfall (mm/month)'},
+  lineWidth: 2,
+  pointSize: 5
+});
+print(chartMonthly);
+
+// ---------- [8] CHART HARIAN ----------
+var chartDaily = ui.Chart.image.series({
+  imageCollection: chirps,
+  region: aoi,
+  reducer: ee.Reducer.mean(),
+  scale: PARAMS.scale
+})
+.setOptions({
+  title: 'CHIRPS Daily Mean (Babakan Madang, Jul–Nov 2022)',
+  hAxis: {title: 'Date'},
+  vAxis: {title: 'Rainfall (mm/day)'},
+  lineWidth: 1
+});
+print(chartDaily);
+
+// ---------- [9] FUNGSI EKSPOR KE CSV ----------
+function icToFeatures(ic, bandName, label){
+  var feats = ic.map(function(im){
+    var date = ee.Date(im.get('system:time_start')).format('YYYY-MM');
+    var stats = im.reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: aoi,
+      scale: PARAMS.scale,
+      maxPixels: 1e13
+    });
+    return ee.Feature(null, {date: date, label: label, mean_mm: stats.get(bandName)});
+  });
+  return ee.FeatureCollection(feats);
+}
+
+function icToFeaturesDaily(ic, bandName){
+  var feats = ic.map(function(im){
+    var date = ee.Date(im.get('system:time_start')).format('YYYY-MM-dd');
+    var stats = im.reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: aoi,
+      scale: PARAMS.scale,
+      maxPixels: 1e13
+    });
+    return ee.Feature(null, {date: date, mean_mm: stats.get(bandName)});
+  });
+  return ee.FeatureCollection(feats);
+}
+
+// ---------- [10] EKSPOR BULANAN ----------
+Export.table.toDrive({
+  collection: icToFeatures(chirpsMonthly, 'P_month', 'monthly_total_mm'),
+  description: 'CHIRPS_BabakanMadang_Monthly_Jul_Nov_2022',
+  fileFormat: 'CSV'
+});
+
+// ---------- [11] EKSPOR HARIAN ----------
+Export.table.toDrive({
+  collection: icToFeaturesDaily(chirps, 'P'),
+  description: 'CHIRPS_BabakanMadang_Daily_Jul_Nov_2022',
+  fileFormat: 'CSV'
+});
+
+// ---------- [12] EKSPOR RASTER TOTAL ----------
+Export.image.toDrive({
+  image: totalPeriod.clip(aoi),
+  description: 'CHIRPS_Total_Jul_Nov_2022_BabakanMadang',
+  region: aoi,
+  scale: PARAMS.scale,
+  maxPixels: 1e13
+});
+
+
+// === Sampel titik CHIRPS (mean Jul–Nov 2022) untuk Babakan Madang ===
+
+// AOI kamu
+var aoi = ee.FeatureCollection('projects/soon-463612/assets/babakan').geometry();
+
+// Periode
+var start = '2022-07-01';
+var end   = '2022-11-30';
+
+// Koleksi CHIRPS harian → mean periode
+var chirpsMean = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+  .filterDate(start, end)
+  .filterBounds(aoi)
+  .select('precipitation')
+  .mean()
+  .rename('P_mean');
+
+// Sampling di resolusi native (~5.6 km)
+var samples = chirpsMean.sample({
+  region: aoi,
+  scale: 5000,      // ≈ resolusi CHIRPS
+  geometries: true
+});
+
+// Cek
+print('Jumlah sampel', samples.size());
+Map.centerObject(aoi, 12);
+Map.addLayer(chirpsMean.clip(aoi), {min:0,max:20,palette:['white','blue']}, 'Mean mm/day');
+Map.addLayer(aoi, {color:'red'}, 'AOI');
+
+// Ekspor CSV: lon, lat, P_mean
+Export.table.toDrive({
+  collection: samples.map(function(f){
+    var ll = f.geometry().coordinates();
+    return ee.Feature(null, {
+      lon: ll.get(0),
+      lat: ll.get(1),
+      P_mean: f.get('P_mean')
+    });
+  }),
+  description: 'CHIRPS_BabakanMadang_Points_Mean_JulNov2022',
+  fileFormat: 'CSV'
+});
+
+// ==============================
+// CHIRPS Resampled Rainfall (Jul–Nov 2022)
+// AOI: Babakan Madang (dari asset shapefile kamu)
+// Output: titik 2 km grid dengan nilai rata-rata curah hujan (mm/hari)
+// ==============================
+
+// 1. AOI
+var aoi = ee.FeatureCollection('projects/soon-463612/assets/babakan').geometry();
+
+// 2. Periode waktu
+var start = '2022-07-01';
+var end   = '2022-11-30';
+
+// 3. Dataset CHIRPS harian → rata-rata periode
+var chirps = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+  .filterDate(start, end)
+  .filterBounds(aoi)
+  .select('precipitation');
+
+var meanRain = chirps.mean().rename('mean_mmday');
+
+// 4. Resampling ke resolusi 2000 m (~2 km)
+var resampled = meanRain.resample('bilinear').reproject({
+  crs: chirps.first().projection(),
+  scale: 2000
+});
+
+// 5. Sampling nilai raster → titik-titik dalam AOI
+var samples = resampled.sample({
+  region: aoi,
+  scale: 2000,     // 2 km
+  geometries: true
+});
+
+// 6. Visualisasi
+Map.centerObject(aoi, 12);
+Map.addLayer(resampled.clip(aoi),
+  {min: 0, max: 20, palette: ['white', 'skyblue', 'blue', 'navy']},
+  'Mean Rainfall (mm/day)');
+Map.addLayer(aoi, {color: 'red'}, 'AOI');
+Map.addLayer(samples, {color: 'yellow'}, 'Sample Points');
+
+// 7. Ekspor ke Drive
+Export.table.toDrive({
+  collection: samples.map(function(f){
+    var ll = f.geometry().coordinates();
+    return ee.Feature(null, {
+      lon: ll.get(0),
+      lat: ll.get(1),
+      mean_mmday: f.get('mean_mmday')
+    });
+  }),
+  description: 'CHIRPS_BabakanMadang_Mean_JulNov2022_Resampled2km',
+  fileFormat: 'CSV'
+});
